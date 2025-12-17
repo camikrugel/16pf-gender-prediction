@@ -1,0 +1,829 @@
+---
+title: "16 Personality Factor Gender Prediction Analysis"
+author: "Cami Krugel"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Data
+
+My data is from 49,159 responses to Cattell's personality test. I
+obtained it via kaggle, as uploaded by Bojan Tunguz
+(<https://www.kaggle.com/datasets/tunguz/cattells-16-personality-factors>),
+who obtained the data from the open-source psychometrics project
+(<https://openpsychometrics.org/_rawdata/>). The original purpose of the
+data was to analyze individual's personalities based on a model of 16
+factors. I will be using the data to see what personality factors best
+predict gender, and create a predictive model based on the questions.
+
+# Variables
+
+My variables of independent variables of interest are the 162 questions
+asked of the participants. They are discrete, as answers to a prompt on
+a scale of 1-5 with 5 being highly agree. No response data was marked as
+a 0.
+
+My dependent variable is gender. It is stored as 1 being male and 2
+being female, with 0 and 3 being NA or other.
+
+I will use factor analysis to create new factors that will become the
+ultimate independent variables.
+
+# Question
+
+What factors can be determined from the answers to the 162 questions?
+Will my analysis produce the same 16 that Cartell's is based on?
+
+What factors best predict gender? Do personality scores differ enough
+across gender to predict accurately?
+
+# Set up & initial wrangling
+
+```{r,include=FALSE}
+# load packages
+library(tidyverse); library(rms); library(ggplot2); library(psych);library(factoextra); library(GGally);
+library(caret); library(glmnet)
+
+# Set seed
+set.seed(1234)
+
+# load data
+personality <- read.csv("data/personality.csv", sep="\t")
+
+```
+
+```{r}
+# look at dependent variable 
+table(personality$gender)
+
+# keep male and female
+personality_clean <- personality %>%
+  filter(gender== 1| gender==2) %>%
+  mutate(gender = ifelse(gender=="2", 0, gender))
+
+# remove all observations with any missing data (response of 0)
+personality_clean <- personality_clean %>%
+  filter_at(c(1:163),all_vars(.!=0))
+
+# remove other variables
+personality_questions <- na.omit(personality_clean[,-c(164:169)])
+```
+
+# Dimension Reduction
+
+Check for multicolliniarity
+
+```{r}
+# get correlations
+correlations <- cor(personality_questions)
+
+# get correlations >=90
+greater_than <- which(correlations >= 0.90, arr.ind = TRUE)
+greater_than <- greater_than[
+  greater_than[,"row"] < greater_than[,"col"],
+]
+```
+
+No correlations are concerning
+
+Perform initial PCA
+
+```{r}
+# scale variables
+scaled_personality <- scale(personality_questions)
+# perform PCA
+personality_pca <- prcomp(scaled_personality, center = T, scale. = T)
+```
+
+19 components predicted over 50%, so I expect to reduce to around that
+number.
+
+Visualize the PCA
+
+```{r}
+fviz_pca_var(
+  personality_pca,
+  col.var = "contrib",
+  gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+  repel = TRUE 
+)
+
+fviz_pca_ind(
+  personality_pca,
+  c = "point",
+  col.ind = "cos2", 
+  gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"), repel = FALSE
+)
+
+fviz_pca_biplot(
+  personality_pca, repel = TRUE,
+  col.var = "#FC4E07", 
+  col.ind = "#00AFBB", 
+  label = "var"
+) 
+```
+
+The variables and variables look decently evenly distributed across
+dimensions.
+
+Confirm PCA is appropriate
+
+```{r}
+cortest.bartlett(scaled_personality)
+KMO(scaled_personality)
+```
+
+PCA is appropriate for the data. In Bartlett's test, p \< .05. The
+overall MSA is .97, which is "marvelous." No individual MSA is below .8,
+which is "meritorious"
+
+Find ideal number of factors
+
+```{r}
+# initial pca
+initial_pca <- principal(scaled_personality, nfactors = ncol(scaled_personality), rotate ="oblimin")
+plot(initial_pca$values, type = "b", ylab = "Eigenvalues"); abline(h = 1);
+
+# parallel pca
+parallel_pca <- fa.parallel(
+  x = scaled_personality, fa = "pc",
+  sim = FALSE 
+)
+```
+
+The plots agree that 22 is optimal
+
+Perform final PCA
+
+```{r}
+final_pca <- principal(
+  r = scaled_personality,
+  nfactors = 22, # ideal 22 factors
+  rotate = "oblimin", 
+  residuals = TRUE
+)
+
+# check for normal residuals
+# get residuals
+resid <- final_pca$residual
+lower_resid <- resid[lower.tri(resid)]
+# perform shapiro test
+shapiro.test(sample(final_pca$residual, 5000))
+# plot
+hist(lower_resid)
+```
+
+The Shapiro test rejected the null hypothesis that the residuals were
+normal, but looking at the plot we see that they are close enough to not
+be concerned.
+
+See what questions were included in each factor
+
+```{r}
+# get loadings
+loadings <- round(final_pca$loadings[,], 3)
+# keep loadings above .3
+loadings[loadings < 0.30] <- "" 
+```
+
+Looking at the loadings, I found these questions for each component and
+added a label:
+
+Component 1: Social
+
+-   I am the life of the party
+-   I love large parties
+-   I enjoy being part of a loud crowd
+-   I feel comfortable around people
+-   I talk to a lot of different people at parties
+-    I don't mind being the center of attention
+-   I make friends easily
+-   I start conversations
+
+Component 2: Simple Minded
+
+-   I try to avoid complex people
+-   I avoid philosophical discussions
+-   I rarely look for a deeper meaning in things
+-   I am not interested in theoretical discussions
+-   I am not interested in abstract ideas
+
+Component 3: Depressed
+
+-   I feel desperate
+-   I often feel blue
+-   I dislike myself
+-   I am easily discouraged
+-   I let myself be pushed around
+-   I feel threatened easily
+-   I have frequent mood swings
+-    I feel crushed by setbacks
+-   I am easily hurt I know that
+-   I am not a special person
+
+Component 4: Empathetic
+
+-   I know how to comfort others
+-   I enjoy bringing people together
+-   I feel others' emotions
+-   I take an interest in other people's lives
+-   I cheer people up
+-   I make people feel at ease
+-   I take time out for others
+
+Component 5: Scattered
+
+-   I put off unpleasant tasks
+-   I am not bothered by messy people
+-   I am not bothered by disorder
+-   I leave a mess in my room
+-    I leave my belongings around
+
+Component 6: Unique
+
+-   I do things that others find strange
+-   I act wild and crazy
+-   I am the last to laugh at a joke
+-   I enjoy wild flights of fantasy
+-   I do unexpected things
+-   I love to daydream
+-   I get confused easily
+-   I swim against the current
+-   I like to get lost in thought
+-   I rarely notice my emotional reactions
+
+Component 7: Open
+
+-   I say what I think
+-   I am willing to talk about myself
+-   I am open about myself to others
+-   I am open about my feelings
+-   I disclose my intimate thoughts
+-   I show my feelings
+
+Component 8: Judgmental
+
+-   I judge people by their appearance
+-   I am quick to judge others
+-   I am annoyed by others' mistakes
+-   I try not to think about the needy
+
+Component 9: Introverted
+
+-   I want to be left alone
+-   I prefer to do things by myself
+-   I enjoy spending time by myself
+-   I seek quiet I don't mind eating alone
+-   I enjoy silence
+-   I enjoy my privacy
+
+Component 10: Intellectual
+
+-   I like to read
+-    I enjoy discussing movies and books with others
+-   I read a lot
+
+Component 11: Trusting
+
+-   I believe that people are basically moral
+-   I trust what people say I trust others
+-   I believe that others have good intentions
+-   I try to forgive and forget
+
+Component 12: Bold
+
+-   I take charge
+-   I want to be in charge
+-   I take control of things
+-   I am not afraid of providing criticism
+-   I can take strong measures
+
+Component 13: Defiant
+
+-   I know how to get around the rules
+-   I resist authority
+-   I break rules
+-   I oppose authority
+-   I take deviant positions
+
+Component 14: Insecure
+
+-   I know that I am not a special person
+-   I consider myself an average person
+
+Component 15: Moody
+
+-   I have frequent mood swings
+-   I find it hard to forgive others
+-   I am easily hurt
+-   I get irritated easily
+-   I get angry easily
+
+Component 16: Funny
+
+-   I joke around a lot
+-   I amuse my friends
+-   I cheer people up
+-   I use swear words
+
+Component 17: Serious
+
+-   I seldom joke around
+-   I seldom get lost in thought
+-   I seldom daydream
+
+Component 18: Analytical
+
+-   I continue until everything is perfect
+-   I am exacting in my work
+-   I tend to analyze things
+-   I want everything to be 'just right'
+-   I use my brain
+-   I reflect on things before acting
+-   I learn quickly
+-   I weigh the pros against the cons
+
+Component 19: Quiet
+
+-   I dislike loud music
+-   I don't like crowded events
+-   I don't like action movies
+
+Component 20: Sentimental
+
+-   I love flowers
+-   I believe in the importance of art
+-   I cry during movies
+
+Component 21: Traditional
+
+-   I like to stand during the national anthem
+-   I believe in one true religion
+
+Component 22: Present
+
+-   I don't worry about things that have already happened
+
+```{r}
+# combine the scores from PCA with the gender data
+personality_scores <- as.data.frame(final_pca$scores)
+personality_traits<- cbind(personality_clean$gender, personality_scores) 
+
+# rename components with descriptive labels
+colnames(personality_traits) <- c("Gender", "Social", "Defiant", "Open", "Trusting","Depressed", "Bold", "Simple-minded","Empathetic", "Scattered","Intellectual", "Analytical", "Funny", "Serious", "Unique", "Judgemental", "Sentimental", "Present", "Quiet", "Insecure","Traditional", "Moody", "Introverted")
+```
+
+# Visualize variables of interest
+
+```{r, message=FALSE}
+# box plots of value vs gender
+personality_traits %>%
+  # change data to long format & subset first half
+  pivot_longer(c(2:12)) %>%
+  ggplot(aes(value, factor(Gender 
+                           # label Gender variable as Female and Male
+                           ,labels = c("Female", "Male") 
+                           ))) +
+  geom_boxplot()+
+  facet_wrap(~name) + 
+  labs(title = "Gender Vs. Normalized Trait Score", 
+       y = "Gender", 
+       x= "Normalized Trait Score", 
+       subtitle = "For Components of Cattell's Personality Test" )
+personality_traits %>%
+  pivot_longer(c(13:23)) %>% 
+  # change data to long format and subset second half
+  ggplot(aes(value, factor(Gender
+                           # label Gender variable as Female and Male
+                           ,labels = c("Female", "Male")))) +
+  geom_boxplot()+
+  facet_wrap(~name)+
+    labs(title = "Gender Vs. Normalized Trait Score", 
+       y = "Gender", 
+       x= "Normalized Trait Score", 
+       subtitle = "For Components of Cattell's Personality Test" )
+
+# ggpairs 
+# subset data to make plot readable
+traits_balanced_1 <-personality_traits[,c(1:8)]
+traits_balanced_2 <-personality_traits[,c(1,9:15)]
+traits_balanced_3 <-personality_traits[,c(1,16:23)]
+# plot
+ggpairs(data = traits_balanced_1)
+ggpairs(data = traits_balanced_2)
+ggpairs(data = traits_balanced_3)
+```
+
+From this visualization it looks as though the bold, funny, quiet, and
+intellectual traits are more stronger in females. The defiant and
+insecure traits are stronger in men.
+
+The ggpairs shows a roughly normal distribution for each trait. Social,
+trusting, simple-minded, and unique were the only variables without a
+significant relationship to gender. This agrees with the box plot, where
+none of these traits had noticeably different distributions in men and
+women.
+
+# Model Data
+
+Because the outcome variable is binary (men or women), I will use
+logistic regression
+
+## Check model assumptions
+
+Multicollinearity
+
+```{r}
+new_cor <- cor(personality_traits[,-1])
+
+# get correlations >= 4
+greater_than_new <- which(new_cor >= 0.4, arr.ind = TRUE)
+greater_than_new <- greater_than_new[
+  greater_than_new[,"row"] < greater_than_new[,"col"],
+]
+```
+
+No factors have a higher correlation than 4, so multicollinearity should
+not be a problem.
+
+```{r}
+# check balance in outcome
+table(personality_traits$Gender)
+
+# rebalance
+traits_balanced <- personality_traits[
+  c(
+  which(personality_traits$Gender == 1), #keep all men
+  # sample 13856 women
+  sample(
+    which(personality_traits$Gender == 0),13856)),
+]
+```
+
+There were more women than men before balancing.
+
+## Split data into training and testing
+
+```{r}
+# use 70% of the observations for training
+train_index <- sample( 1:nrow(traits_balanced), round(nrow(traits_balanced) * 0.70)
+)
+
+# save other 30% for testing
+test_index <- setdiff(
+  1:nrow(traits_balanced),
+  train_index)
+```
+
+## Model Selection
+
+```{r}
+# perform initial logistic regression
+trait_lrm<- glm(
+  formula = Gender ~.,
+  data = traits_balanced[train_index,],
+  family = "binomial"
+)
+# check for multicollinearity 
+vif(trait_lrm)
+```
+
+Use LASSO regularization
+
+```{r}
+# get matricies of predictors and outcomes
+new_predictors <-as.matrix(traits_balanced[train_index,c(2:23)])
+test_predictors <-as.matrix(traits_balanced[test_index,c(2:23)])
+new_outcome <-as.matrix(traits_balanced[train_index,1])
+test_outcome <- as.matrix(traits_balanced[test_index,1])
+
+# perform cross validation to determine best lambda
+cv_lasso_h <- cv.glmnet(
+  as.matrix(new_predictors),
+  as.matrix(new_outcome),
+  alpha=1
+)
+
+# print results
+cv_lasso_h
+plot(cv_lasso_h)
+
+# save best lambda
+best_lambda <- cv_lasso_h$lambda.min
+```
+
+The best lambda found was .00451.
+
+Perform LASSO with this lambda
+
+```{r}
+# perform lasso
+best_lasso <-  glmnet(
+  as.matrix(new_predictors),
+  as.matrix(new_outcome),
+  family = "binomial",
+  alpha=1,
+  lambda = best_lambda
+)
+
+# obtain coefficients
+# lasso coefficients
+lasso_coef <- unname(as.matrix(coef(best_lasso)))
+# regular logistic coefficients
+lrm_coef <- coef(trait_lrm)
+# combine into data frame
+data.frame(
+  lasso = lasso_coef,
+  lrm = lrm_coef,
+  difference = lasso_coef - lrm_coef
+)
+```
+
+Most factors had similar coefficients. LASSO removed simple-minded
+entirely, as expected by it's insignificant relationship with gender.
+Quiet changed the most, with a decrease in magnitude of .009.
+
+## Model evaluation & selection
+
+```{r}
+# Get predicted from lasso
+lasso_predicted <- predict( 
+  best_lasso, newx = new_predictors
+)
+
+# Get predicted from regular
+lrm_predicted <- predict(
+  trait_lrm, newx= new_predictors
+)
+
+# R-squared 
+cor(lasso_predicted, new_outcome)^2
+cor(lrm_predicted, new_outcome)^2
+
+# RMSE
+sqrt(mean((lasso_predicted-new_outcome)^2))
+sqrt(mean((lrm_predicted-new_outcome)^2))
+```
+
+Both models explained about 32% of variability in data. The average
+difference between model prediction and actual value was also about the
+same, but the lasso performed slightly better with an RMSE of 1.56
+compared to 1.58.
+
+```{r}
+# Convert prediction to gender factor
+# for lasso
+gender_lasso <- factor( 
+  ifelse(lasso_predicted > 0.50, 1, 0))
+# for regular logistic
+gender_lrm <- factor( 
+  ifelse(lrm_predicted > 0.50, 1, 0))
+
+# Get test classes
+# for lasso
+test_lasso <- factor( 
+  ifelse(
+    # make prediction on new data
+    predict( best_lasso,
+             test_predictors) > 0.50, 1, 0))
+# for regular
+test_lrm <- factor( 
+  ifelse(
+    # make prediction on new data
+    predict(trait_lrm,
+             as.data.frame(test_predictors)) > 0.50, 1, 0))
+
+
+```
+
+## Confusion matrices
+
+```{r}
+# training data
+# lasso
+confusionMatrix(data = gender_lasso, positive = "1",
+                reference = factor(new_outcome))
+# regular logistic
+confusionMatrix(data = gender_lrm, positive = "1",
+                reference = factor(new_outcome))
+
+# testing data
+# lasso
+confusionMatrix(data = test_lasso, positive = "1",
+                reference = factor(test_outcome))
+# regular logistic
+confusionMatrix(data = test_lrm, positive = "1",
+                reference = factor(test_outcome))
+```
+
+The regular logistic model has a slightly higher Kappa value of .4974 as
+compared to LASSO's of .4961. The overall accuracy, sensitivity, and
+specificity of the logistic model were about the same in both models, at
+around .74, .63, and .86. As noted by the higher specificity, the model
+had more success predicting women than men (coded as 1).
+
+In the testing data, the Kappa values were even higher with .5122
+(regular logistic) and .5134 (LASSO). The accuracy was also higher with
+both around .76 as compared to .74. The sensitivity was slightly higher
+(.64), as well as specificity, which was still higher at .87.
+
+There was not a huge difference in models, and slightly higher kappa
+values in the regular logistic model than the one using LASSO.
+
+## Try another model
+
+Since the model with non-significant predictors was better than the
+LASSO, I will try removing them.
+
+```{r}
+# keep only significant predictors
+traits_signif <- traits_balanced[train_index,-c(2,4,8,14,21,22)]
+
+# run logistic regression
+trait_lrm_2<- glm(
+  formula = Gender ~.,
+  data = traits_signif,
+  family = "binomial"
+)
+
+# Get predicted gender
+lrm_predicted_2 <- predict(
+  trait_lrm, newx= traits_signif[,-1]
+)
+
+gender_lrm_2 <- factor( 
+  ifelse(lrm_predicted_2 > 0.50, 1, 0))
+
+# Get test classes
+test_lrm_2 <- factor( 
+  ifelse(
+    # make prediction on new data
+    predict(trait_lrm_2,
+             as.data.frame(test_predictors)) > 0.50, 1, 0))
+
+# R-squared 
+cor(lrm_predicted_2, new_outcome)^2
+
+# RMSE
+sqrt(mean((lrm_predicted_2-new_outcome)^2))
+
+# confusion marticies
+# training data
+confusionMatrix(data = gender_lrm_2, positive = "1",
+                reference = factor(new_outcome))
+
+# testing data
+confusionMatrix(data = test_lrm_2, positive = "1",
+                reference = factor(test_outcome))
+
+# check AIC of models
+AIC(trait_lrm_2)
+AIC(trait_lrm)
+```
+
+This model still explains 32% of variability in the data with an RMSE of
+1.58. The Kappa value, specificity, sensitivity, and accuracy, still are
+the same, as removing the insignificant predictors did not change much.
+However, looking at the AIC which takes in model complexity, the new
+model performed better with 19257 vs 19288.
+
+# Findings
+
+```{r}
+final_trait_lrm <- trait_lrm_2
+
+# odds ratio
+exp(final_trait_lrm$coefficients)
+```
+
+Strongest predictors of men:
+
+-   Introverted
+    -   An increase of one standard deviation of the introverted score
+        is makes the odds of the respondent being a man 1.53 times as
+        likely.
+-   Insecure
+    -   An increase of one standard deviation of the insecure score is
+        makes the odds of the respondent being a man 1.51 times as
+        likely.
+-   Present
+    -   An increase of one standard deviation of the present score is
+        makes the odds of the respondent being a man 1.37 times as
+        likely.
+-   Defiant
+    -   An increase of one standard deviation of the defiant score is
+        makes the odds of the respondent being a man 1.37 times as
+        likely.
+
+Strongest predictors of women:
+
+-   Quiet
+    -   An increase of one standard deviation of the quiet score is
+        makes the odds of the respondent being a woman 3.22 times as
+        likely.
+-   Scattered
+    -   An increase of one standard deviation of the scattered score is
+        makes the odds of the respondent being a woman 2.02 times as
+        likely.
+-   Funny
+    -   An increase of one standard deviation of the funny score is
+        makes the odds of the respondent being a woman 1.64 times as
+        likely.
+-   Bold
+    -   An increase of one standard deviation of the bold score is makes
+        the odds of the respondent being a woman 1.49 times as likely. -
+-    Intellectual
+    -   An increase of one standard deviation of the intellectual score
+        is makes the odds of the respondent being a woman 1.41 times as
+        likely.
+
+## Summary
+
+The PCA found 22 components from the 162 questions on the personality
+test: social, simple-minded, depressed, empathetic, scattered, unique,
+open, judgmental, introverted, intellectual, trusting, bold, defiant,
+insecure, moody, funny, serious, analytical, quiet, sentimental,
+traditional, present.
+
+Logistic Regression was performed normally and with LASSO
+regularization. The logistic regression performed better. Then, I
+removed the insignificant traits of social, open, simple-minded,
+serious, traditional, moody. These traits had little to no effect on
+gender of respondent.
+
+This final model (composed of depressed, empathetic, scattered, unique,
+judgmental, introverted, intellectual, trusting, bold, defiant,
+insecure, funny, analytical, quiet, sentimental, and present) explained
+32% of variability in the data with an RMSE of 1.58. The model was 74%
+accurate on training data and 76% accurate on testing data. The model
+performed better predicting women than men.
+
+The model's strongest predictors (odds ratio \> 1.3) of men were high
+scores in introverted, insecure, present, and defiant. The model's
+strongest predictors of women were high scores in quiet, scattered,
+funny, bold, and intellectual.
+
+## Research Question
+
+What factors can be determined from the answers to the 162 questions?
+
+> Social, simple-minded, depressed, empathetic, scattered, unique, open,
+> judgmental, introverted, intellectual, trusting, bold, defiant,
+> insecure, moody, funny, serious, analytical, quiet, sentimental,
+> traditional, and present.
+
+Will my analysis produce the same 16 that Cartell's is based on?
+
+> No, my analysis did not produce the same 16.
+
+What factors best predict gender?
+
+> Depressed, empathetic, scattered, unique, judgmental, introverted,
+> intellectual, trusting, bold, defiant, insecure, funny, analytical,
+> quiet, sentimental, and present
+
+Do personality scores differ enough across gender to predict accurately?
+
+> The low r\^2 value (.32) and high RMSE (1.58) show that the model does
+> not perform extremely well on the data. However, the model could
+> predict with 76% accuracy on testing data which shows that it does
+> perform better than random and gender does have some effect on scores.
+
+## Implications
+
+My findings are interesting, as the predictors did not always predict
+the gender I was expecting. For example, I would not have expected bold
+as a female trait or insecure as a male one. I find this interesting
+because people's own feelings and responses do not necessarily conform
+to gender stereotypes. The low r\^2 value and high RMSE also show that
+gender is difficult to predict from responses to personality questions.
+This shows that there are not major differences between the genders.
+
+## Limitations
+
+The LASSO regularization did not work well on the data due to the large
+sample compared to small number of predictors. If I would have performed
+the regression before feature selection and removing variables, it may
+have had a different outcome.
+
+The data was response from humans, who are unpredictable. Their answers
+may not accurately reflect their actual traits but rather their
+self-perception of those traits.
+
+Also, the questions in the dataset were pointed at specific traits which
+my PCA did not pick out. Some were similar, but it split the questions
+in different ways. Therefore, when I performed my regression, the amount
+of questions included in each factor was not equal. For example
+"present" only had one, and "unique" had 10.
+
+## Future Directions
+
+I would be interested in looking at prediction using Cartell's original
+16 factors. I also would be interested in looking at another variable in
+the data, such as age or country, and seeing if they were impacted by
+the factors I found.
